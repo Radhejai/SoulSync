@@ -2,6 +2,7 @@ import {
   Injectable,
   ConflictException,
   UnauthorizedException,
+  ForbiddenException,
   BadRequestException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -84,7 +85,7 @@ export class AuthService {
     const supabase = getSupabaseAdmin();
     const { data: user } = await supabase
       .from('users')
-      .select('id, password_hash, mobile_verified')
+      .select('id, password_hash, mobile_verified, is_banned')
       .eq('email', email)
       .maybeSingle();
 
@@ -92,6 +93,10 @@ export class AuthService {
 
     const matches = await bcrypt.compare(password, user.password_hash);
     if (!matches) throw new UnauthorizedException('Invalid credentials');
+
+    if (user.is_banned) {
+      throw new ForbiddenException('This account has been suspended');
+    }
 
     if (!user.mobile_verified) {
       throw new UnauthorizedException('Please complete mobile verification first');

@@ -14,11 +14,20 @@ create table if not exists users (
   verification_tier text not null default 'unverified'
     check (verification_tier in ('unverified','basic','verified','trusted')),
   profile_picture_url text,
+  is_admin boolean not null default false,
+  strike_count int not null default 0,
+  is_banned boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
 alter table users enable row level security;
+
+-- Safe to re-run: adds these columns if this schema was already applied
+-- before they existed (create table if not exists skips existing tables).
+alter table users add column if not exists is_admin boolean not null default false;
+alter table users add column if not exists strike_count int not null default 0;
+alter table users add column if not exists is_banned boolean not null default false;
 
 create policy "Users can read own row"
   on users for select
@@ -152,3 +161,53 @@ create policy "Anyone can view non-removed comments"
   using (is_removed = false);
 
 create index if not exists idx_comments_post on comments(post_id, created_at asc);
+
+-- ============ REPORTS ============
+-- reporter_id is stored (needed for abuse-of-reporting checks and pattern
+-- analysis) but NEVER returned to the reported user or other members —
+-- enforced by omitting it from every non-admin API response, and by RLS
+-- default-deny below (no select policy = no client-role access at all).
+create table if not exists reports (
+  id uuid primary key default gen_random_uuid(),
+  reporter_id uuid not null references users(id) on delete cascade,
+  target_type text not null check (target_type in ('post','comment','user')),
+  target_id uuid not null,
+  reason_category text not null
+    check (reason_category in (
+      'harassment','hate_speech','spam','misinformation',
+      'inappropriate_content','impersonation','other'
+    )),
+  description text,
+  severity text not null default 'low' check (severity in ('low','medium','high')),
+  status text not null default 'pending'
+    check (status in ('pending','actioned','dismissed')),
+  reviewed_by uuid references users(id),
+  reviewed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+alter table reports enable row level security;
+-- No select/insert/update policies defined: default-deny for every
+-- non-service-role client. All access goes through the backend, which uses
+-- the service role key and enforces admin-only reads in ReportsService.
+
+create index if not exists idx_reports_target on reports(target_type, target_id);
+create index if not exists idx_reports_status on reports(status, severity);
+
+-- ============ STRIKES ============
+-- One row per confirmed violation, tied to the report that triggered it.
+-- A user's total strike_count (on the users table) drives the 3-strike
+-- suspension — not a community vote.
+create table if not exists strikes (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  report_id uuid not null references reports(id),
+  reason_category text not null,
+  issued_by uuid references users(id),
+  created_at timestamptz not null default now()
+);
+
+alter table strikes enable row level security;
+-- Default-deny, same reasoning as reports.
+
+create index if not exists idx_strikes_user on strikes(user_id);
